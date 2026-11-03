@@ -2,6 +2,11 @@ from nba_api.stats.endpoints import drafthistory, playercareerstats, playeraward
 import pandas as pd
 import time
 
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
+
+
 def get_draft_history():
     import os
     if os.path.exists('draft_history.csv'):
@@ -246,6 +251,44 @@ def calculate_final_scores(stats_df, awards_df):
 
     return df, team_scores
 
+def visualize_rankings(team_scores):
+    fig, ax = plt.subplots(figsize=(14, 10))
+
+    top20 = team_scores.head(20).copy()
+    top20 = top20.iloc[::-1].reset_index(drop=True)
+
+    base_scores = top20['TOTAL_DRAFT_SCORE'] - top20['TOTAL_AWARD_POINTS']
+    award_scores = top20['TOTAL_AWARD_POINTS']
+    teams = top20['TEAM_ABBREVIATION'].tolist()  # convert to plain list
+    best_players = top20['BEST_PLAYER'].tolist()
+
+    y = np.arange(len(teams))
+
+    ax.barh(y, base_scores, color='steelblue', label='Stats Score')
+    ax.barh(y, award_scores, left=base_scores, color='gold', label='Award Bonus')
+
+    for i, (base, award, player) in enumerate(zip(base_scores, award_scores, best_players)):
+        total = base + award
+        ax.text(total + 2, i, player, va='center', fontsize=8, color='black')
+
+    # Force linear scale and set team labels explicitly
+    ax.set_yscale('linear')
+    ax.set_yticks(y)
+    ax.set_yticklabels(teams, fontsize=10)
+    ax.set_xlabel('Total Draft Score', fontsize=12)
+    ax.set_title('NBA Draft Quality Rankings 2010–2023\n(Normalized by picks used)', fontsize=14, fontweight='bold')
+    ax.legend(loc='lower right')
+    ax.set_xlim(0, top20['TOTAL_DRAFT_SCORE'].max() * 1.35)
+
+    ax.xaxis.grid(True, linestyle='--', alpha=0.5)
+    ax.set_axisbelow(True)
+
+    plt.tight_layout()
+    plt.savefig('draft_rankings.png', dpi=150)
+    plt.show()
+    print("Chart saved to draft_rankings.png")
+
+
 import os
 
 stats_df = pd.read_csv('player_stats.csv')
@@ -263,3 +306,8 @@ player_df, team_scores = calculate_final_scores(stats_df, awards_df)
 stats_df = pd.read_csv('player_stats.csv')
 gobert = stats_df[stats_df['PLAYER_NAME'].str.contains('Gobert')]
 print(gobert[['PLAYER_NAME', 'TEAM_ABBREVIATION', 'OVERALL_PICK', 'SEASON']])
+
+stats_df  = pd.read_csv('player_stats.csv')
+awards_df = pd.read_csv('player_awards.csv')
+player_df, team_scores = calculate_final_scores(stats_df, awards_df)
+visualize_rankings(team_scores)
