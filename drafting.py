@@ -1,21 +1,26 @@
-from nba_api.stats.endpoints import drafthistory, playercareerstats, playerawards
-import pandas as pd
+import os
 import time
 
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
+import pandas as pd
+
+# nba_api is imported inside the fetch functions, so the scoring and chart can be
+# rebuilt from the saved CSVs without it installed.
+
+FIRST_DRAFT, LAST_DRAFT = 2010, 2022  # inclusive
 
 
 def get_draft_history():
-    import os
     if os.path.exists('draft_history.csv'):
         print("Draft history already exists, loading from file...")
         return pd.read_csv('draft_history.csv')
 
+    from nba_api.stats.endpoints import drafthistory
+
     draft_data = []
 
-    for year in range(2010, 2023):
+    for year in range(FIRST_DRAFT, LAST_DRAFT + 1):
         print(f"Fetching draft history for year: {year}")
 
         draft = drafthistory.DraftHistory(league_id='00', season_year_nullable=year)
@@ -34,6 +39,8 @@ def get_draft_history():
     return full_draft
 
 def get_player_stats(person_id, player_name):
+    from nba_api.stats.endpoints import playercareerstats
+
     for attempt in range(3):  # try up to 3 times
         try:
             career = playercareerstats.PlayerCareerStats(player_id=person_id)
@@ -135,69 +142,72 @@ ALL_NBA_VALUES = {
 }
 
 def get_awards_for_player(person_id, player_name):
-    try:
-        awards_data = playerawards.PlayerAwards(player_id=person_id)
-        df = awards_data.get_data_frames()[0]
+    """Return the player's award bonus, or None if the API kept failing.
 
-        if df.empty:
-            return 0
+    None (not 0) matters: a failed request must not look like "no awards",
+    or the player is silently under-scored.
+    """
+    from nba_api.stats.endpoints import playerawards
 
-        total_bonus = 0
+    for attempt in range(3):
+        try:
+            df = playerawards.PlayerAwards(player_id=person_id).get_data_frames()[0]
+            break
+        except Exception as e:
+            print(f"  Attempt {attempt + 1} failed for {player_name}: {e}")
+            if attempt < 2:
+                time.sleep(2 ** (attempt + 1))  # 2s, then 4s
+    else:
+        return None
 
-        for _, award_row in df.iterrows():
-            description = award_row['DESCRIPTION']
+    total_bonus = 0
+    for _, award_row in df.iterrows():
+        description = award_row['DESCRIPTION']
+        if description == 'All-NBA':
+            # team number comes back as a string '1', '2', or '3'
+            try:
+                total_bonus += ALL_NBA_VALUES.get(int(award_row['ALL_NBA_TEAM_NUMBER']), 0)
+            except (ValueError, TypeError):
+                pass  # NaN or unparseable team number
+        elif description in AWARD_VALUES:
+            total_bonus += AWARD_VALUES[description]
+    return total_bonus
 
-            if description == 'All-NBA':
-                team_number = award_row['ALL_NBA_TEAM_NUMBER']
-                # team_number comes back as a string '1', '2', or '3'
-                # so we convert it to int before looking it up
-                try:
-                    bonus = ALL_NBA_VALUES.get(int(team_number), 0)
-                    total_bonus += bonus
-                except (ValueError, TypeError):
-                    pass  # skip if team_number is NaN or unparseable
 
-            elif description in AWARD_VALUES:
-                total_bonus += AWARD_VALUES[description]
-
-        return total_bonus
-
-    except Exception as e:
-        print(f"  Error fetching awards for {player_name}: {e}")
-        return 0
-
+def add_base_scores(df):
+    df['PER_GAME_SCORE']  = df['PTS_PER_G'] + (df['REB_PER_G'] * 0.7) + (df['AST_PER_G'] * 0.7)
+    df['DURABILITY']      = (df['GP'] / 500).clip(upper=1.0)
+    df['PICK_MULTIPLIER'] = 1 + (df['OVERALL_PICK'] - 1) / 59
+    df['DRAFT_SCORE']     = df['PER_GAME_SCORE'] * df['DURABILITY'] * df['PICK_MULTIPLIER']
+    return df
 
 
 def get_all_awards(stats_df):
     # Only fetch awards for players who actually had impact (saves ~400 API calls)
-    df = stats_df.copy()
-    df['PER_GAME_SCORE'] = df['PTS_PER_G'] + (df['REB_PER_G'] * 0.7) + (df['AST_PER_G'] * 0.7)
-    df['DURABILITY'] = (df['GP'] / 500).clip(upper=1.0)
-    df['PICK_MULTIPLIER'] = 1 + (df['OVERALL_PICK'] - 1) / 59
-    df['DRAFT_SCORE'] = df['PER_GAME_SCORE'] * df['DURABILITY'] * df['PICK_MULTIPLIER']
-
-    # Only bother checking awards for players with meaningful draft scores
-    worthy = df[df['DRAFT_SCORE'] >= 5.0].copy()
+    df = add_base_scores(stats_df.copy())
+    worthy = df[df['DRAFT_SCORE'] >= 5.0]
     print(f"Fetching awards for {len(worthy)} players with draft score >= 5...")
 
-    award_bonuses = {}
-
-    for i, row in worthy.iterrows():
-        print(f"  [{i}] {row['PLAYER_NAME']}...")
+    award_bonuses, failed = {}, []
+    for _, row in worthy.iterrows():
         bonus = get_awards_for_player(row['PERSON_ID'], row['PLAYER_NAME'])
-        if bonus > 0:
-            print(f"       -> {bonus} award points")
-        award_bonuses[row['PERSON_ID']] = bonus
+        if bonus is None:
+            failed.append({'PERSON_ID': row['PERSON_ID'], 'PLAYER_NAME': row['PLAYER_NAME']})
+        else:
+            award_bonuses[row['PERSON_ID']] = bonus
         time.sleep(0.8)
 
-    # Save so we don't have to re-fetch
-    awards_df = pd.DataFrame([
-        {'PERSON_ID': pid, 'AWARD_BONUS': bonus}
-        for pid, bonus in award_bonuses.items()
-    ])
+    awards_df = pd.DataFrame(
+        [{'PERSON_ID': pid, 'AWARD_BONUS': bonus} for pid, bonus in award_bonuses.items()]
+    )
     awards_df.to_csv('player_awards.csv', index=False)
     print(f"\nDone! Saved awards for {len(awards_df)} players.")
+
+    if failed:
+        pd.DataFrame(failed).to_csv('failed_awards.csv', index=False)
+        print(f"WARNING: {len(failed)} award lookups failed; see failed_awards.csv and re-run.")
     return awards_df
+
 
 def calculate_final_scores(stats_df, awards_df):
     df = stats_df.copy()
@@ -220,10 +230,7 @@ def calculate_final_scores(stats_df, awards_df):
     print(top_awards[['PLAYER_NAME', 'TEAM_ABBREVIATION', 'OVERALL_PICK', 'AWARD_BONUS']].head(20).to_string(index=False))
 
     # Scoring
-    df['PER_GAME_SCORE']  = df['PTS_PER_G'] + (df['REB_PER_G'] * 0.7) + (df['AST_PER_G'] * 0.7)
-    df['DURABILITY']      = (df['GP'] / 500).clip(upper=1.0)
-    df['PICK_MULTIPLIER'] = 1 + (df['OVERALL_PICK'] - 1) / 59
-    df['DRAFT_SCORE']     = df['PER_GAME_SCORE'] * df['DURABILITY'] * df['PICK_MULTIPLIER']
+    df = add_base_scores(df)
     df['TOTAL_SCORE']     = df['DRAFT_SCORE'] + df['AWARD_BONUS']
 
     # Aggregate by team
@@ -235,6 +242,8 @@ def calculate_final_scores(stats_df, awards_df):
         BEST_PLAYER        = ('TOTAL_SCORE',  lambda x: df.loc[x.idxmax(), 'PLAYER_NAME'])
     ).reset_index()
 
+    # Divide by sqrt(picks): a raw sum rewards teams that simply had more picks,
+    # a plain average rewards teams with a few lucky ones. sqrt is the middle ground.
     team_scores['NORMALIZED_SCORE'] = (
         team_scores['TOTAL_DRAFT_SCORE'] / team_scores['PLAYERS_DRAFTED'].pow(0.5)
     )
@@ -257,8 +266,11 @@ def visualize_rankings(team_scores):
     top20 = team_scores.head(20).copy()
     top20 = top20.iloc[::-1].reset_index(drop=True)
 
-    base_scores = top20['TOTAL_DRAFT_SCORE'] - top20['TOTAL_AWARD_POINTS']
-    award_scores = top20['TOTAL_AWARD_POINTS']
+    # Plot the same normalized score the ranking is sorted by, split into its
+    # stats and award parts (both divided by sqrt(picks)).
+    scale = top20['PLAYERS_DRAFTED'].pow(0.5)
+    base_scores = (top20['TOTAL_DRAFT_SCORE'] - top20['TOTAL_AWARD_POINTS']) / scale
+    award_scores = top20['TOTAL_AWARD_POINTS'] / scale
     teams = top20['TEAM_ABBREVIATION'].tolist()  # convert to plain list
     best_players = top20['BEST_PLAYER'].tolist()
 
@@ -269,45 +281,37 @@ def visualize_rankings(team_scores):
 
     for i, (base, award, player) in enumerate(zip(base_scores, award_scores, best_players)):
         total = base + award
-        ax.text(total + 2, i, player, va='center', fontsize=8, color='black')
+        ax.text(total + 1, i, player, va='center', fontsize=8, color='black')
 
     # Force linear scale and set team labels explicitly
     ax.set_yscale('linear')
     ax.set_yticks(y)
     ax.set_yticklabels(teams, fontsize=10)
-    ax.set_xlabel('Total Draft Score', fontsize=12)
-    ax.set_title('NBA Draft Quality Rankings 2010–2023\n(Normalized by picks used)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Normalized draft score (total ÷ √picks)', fontsize=12)
+    ax.set_title(f'NBA Draft Quality Rankings {FIRST_DRAFT}–{LAST_DRAFT}\n(Normalized by picks used)', fontsize=14, fontweight='bold')
     ax.legend(loc='lower right')
-    ax.set_xlim(0, top20['TOTAL_DRAFT_SCORE'].max() * 1.35)
+    ax.set_xlim(0, top20['NORMALIZED_SCORE'].max() * 1.35)
 
     ax.xaxis.grid(True, linestyle='--', alpha=0.5)
     ax.set_axisbelow(True)
 
     plt.tight_layout()
     plt.savefig('draft_rankings.png', dpi=150)
-    plt.show()
+    if plt.get_backend().lower() != 'agg':
+        plt.show()
     print("Chart saved to draft_rankings.png")
 
 
-import os
 
-stats_df = pd.read_csv('player_stats.csv')
-
-# Only fetch awards if file does not exist
-if not os.path.exists('player_awards.csv'):
-    print("Awards file not found — fetching from API...")
-    awards_df = get_all_awards(stats_df)
-else:
-    awards_df = pd.read_csv('player_awards.csv')
-
-player_df, team_scores = calculate_final_scores(stats_df, awards_df)
+def main():
+    draft_df = get_draft_history()
+    stats_df = (pd.read_csv('player_stats.csv') if os.path.exists('player_stats.csv')
+                else get_all_player_stats(draft_df))
+    awards_df = (pd.read_csv('player_awards.csv') if os.path.exists('player_awards.csv')
+                 else get_all_awards(stats_df))
+    _, team_scores = calculate_final_scores(stats_df, awards_df)
+    visualize_rankings(team_scores)
 
 
-stats_df = pd.read_csv('player_stats.csv')
-gobert = stats_df[stats_df['PLAYER_NAME'].str.contains('Gobert')]
-print(gobert[['PLAYER_NAME', 'TEAM_ABBREVIATION', 'OVERALL_PICK', 'SEASON']])
-
-stats_df  = pd.read_csv('player_stats.csv')
-awards_df = pd.read_csv('player_awards.csv')
-player_df, team_scores = calculate_final_scores(stats_df, awards_df)
-visualize_rankings(team_scores)
+if __name__ == '__main__':
+    main()

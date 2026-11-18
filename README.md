@@ -1,5 +1,5 @@
-NBA Draft Quality Analysis (2010–2023)
-Ranks all 30 NBA teams by the quality of players they drafted between 2010 and 2023, using a composite scoring model built on career stats, pick position, and individual awards.
+NBA Draft Quality Analysis (2010–2022)
+Ranks all 30 NBA teams by the quality of players they drafted in the 2010 through 2022 drafts, using a composite scoring model built on career stats, pick position, and individual awards.
 
 Data Sources
 
@@ -31,8 +31,20 @@ All-NBA Third Team                4
 NBA Sixth Man of the Year         4
 NBA All-Star                      4
 
+Team Score
+Only players with at least 82 career games count. Each team's player scores are summed, then divided by the square root of the number of picks it used:
+normalized_score = total_score / sqrt(players_drafted)
+A raw sum rewards teams that simply had more picks; a plain average rewards teams with a few lucky picks. The square root is a middle ground. The chart plots this normalized score, split into its stats and award parts.
+
+Data Quality
+Requests are paced and retried with increasing waits, and stats are checkpointed to CSV after every player so an interrupted run resumes where it stopped. An award lookup that keeps failing is written to failed_awards.csv instead of being scored as zero awards, so a network error can't silently under-score a player.
+
+Running
+python drafting.py rebuilds the rankings and chart from the saved CSVs (nba_api is only needed to re-fetch data).
+
 Limitations
 Draft-night trades: Credit is given to the selecting team, not the team that ultimately developed the player. Kawhi Leonard (Indiana → San Antonio), Luka Dončić (Atlanta → Dallas), and Rudy Gobert (Denver → Utah) are all credited to their selecting franchise. This measures talent identification, not player development.
-Recent draft classes: Players from 2021–2023 have played 2–4 seasons at most. Their scores are systematically lower than those of veterans, which understates their eventual value. Rankings will shift as these players develop.
+Recent draft classes: Players from the 2020–2022 drafts have played only a few seasons. Their scores are systematically lower than those of veterans, which understates their eventual value. Rankings will shift as these players develop.
+Awards are voted, not measured: MVP, Most Improved, and the other awards are decided by media voters, so they include a human element (narrative, team record, voter fatigue). MVP is not a direct measure of the best player, and Most Improved rewards change rather than quality. Award bonuses are kept modest relative to the stats score for this reason.
 VORP approximation: True VORP (Basketball Reference) is not available via the NBA's API. The per_game_score metric is a proxy that correlates strongly with VORP but is not equivalent to it. It does not account for pace, usage rate, or position scarcity.
 Franchise continuity: Relocated teams are merged under their current abbreviation (e.g. NJN → BKN). Charlotte uses a single CHA abbreviation across both the Bobcats and Hornets eras.
